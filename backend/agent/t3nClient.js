@@ -150,6 +150,7 @@ async function initAgent() {
     console.warn('    All T3N calls will use simulation responses with identical API structure.');
     agentState.simulationMode = true;
     agentState.initialized    = true;
+    agentState.verified       = true; // simulated identity is still considered verified
     agentState.initError      = reason;
     agentState.initTimestamp  = new Date().toISOString();
   }
