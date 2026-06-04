@@ -141,10 +141,16 @@ async function initAgent() {
     agentState.initTimestamp = new Date().toISOString();
     console.log('✅ T3N: Phoenix Agent initialized in LIVE mode — DID:', agentState.did);
   } catch (err) {
-    console.error('❌ T3N: Live init failed, falling back to simulation:', err.message);
+    const is401 = err.response?.status === 401;
+    const reason = is401
+      ? 'T3N API key not authorized for DID/VC endpoints on staging.terminal3.io. Register the DID at https://app.terminal3.io first.'
+      : err.message;
+    console.warn('⚠️  T3N: Live init → simulation mode.');
+    console.warn('    Reason:', reason);
+    console.warn('    All T3N calls will use simulation responses with identical API structure.');
     agentState.simulationMode = true;
     agentState.initialized    = true;
-    agentState.initError      = err.message;
+    agentState.initError      = reason;
     agentState.initTimestamp  = new Date().toISOString();
   }
 
