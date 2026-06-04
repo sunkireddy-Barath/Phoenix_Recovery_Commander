@@ -93,13 +93,35 @@ router.post('/approve-escalation', async (req, res) => {
 
     console.log(`👤 T3N: Human approval — ${action} by ${approvedBy} (${approverRole})`);
 
-    // Record human approval as T3N audit VC
+    // ── T3N: Record human approval VC ────────────────────────────────────────
+    // Push PENDING op so the live gatekeeper feed shows this immediately
+    incident.t3nOperations.push({
+      type:      'HUMAN_APPROVAL_AUDIT',
+      status:    'LOGGING',
+      action:    'HUMAN_APPROVAL',
+      approvedBy,
+      timestamp: new Date().toISOString()
+    });
+
     const approvalAudit = await t3n.logAuditTrail(
       'HUMAN_APPROVAL',
       incident.agentIdentity?.did,
       'APPROVED',
       { incidentId, scenarioId: incident.scenarioId, approvedBy, approverRole, action, telemetry: incident.telemetry }
     );
+
+    // Update op to LOGGED
+    incident.t3nOperations[incident.t3nOperations.length - 1] = {
+      type:       'HUMAN_APPROVAL_AUDIT',
+      status:     'LOGGED',
+      action:     'HUMAN_APPROVAL',
+      approvedBy,
+      vcId:       approvalAudit.vcId,
+      cid:        approvalAudit.cid,
+      block_hash: approvalAudit.block_hash,
+      simulation: approvalAudit.simulation,
+      timestamp:  new Date().toISOString()
+    };
 
     incident.auditTrail.push({
       id:             approvalAudit.vcId,
@@ -125,12 +147,33 @@ router.post('/approve-escalation', async (req, res) => {
       const approvedStep = { ...blockedStep, authorized: true };
       const execResult   = playbook.simulateStepExecution(approvedStep, incident.scenario);
 
+      // ── T3N: Record execution audit VC ─────────────────────────────────────
+      incident.t3nOperations.push({
+        type:      'AUDIT_LOG',
+        status:    'LOGGING',
+        action:    approvedStep.action,
+        humanApproved: true,
+        timestamp: new Date().toISOString()
+      });
+
       const execAudit = await t3n.logAuditTrail(
         action,
         incident.agentIdentity?.did,
         'SUCCESS',
         { incidentId, scenarioId: incident.scenarioId, stepIndex: approvedStep.step, approvedBy, approverRole, telemetry: incident.telemetry }
       );
+
+      incident.t3nOperations[incident.t3nOperations.length - 1] = {
+        type:       'AUDIT_LOG',
+        status:     'LOGGED',
+        action:     approvedStep.action,
+        humanApproved: true,
+        vcId:       execAudit.vcId,
+        cid:        execAudit.cid,
+        block_hash: execAudit.block_hash,
+        simulation: execAudit.simulation,
+        timestamp:  new Date().toISOString()
+      };
 
       incident.completedSteps.push({
         id:              `step-approved-${Date.now()}`,

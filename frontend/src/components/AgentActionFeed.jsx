@@ -188,8 +188,9 @@ function T3NGatekeeperFlow({ operations }) {
               op.status === 'DENIED' ? 'bg-red-500' : 'bg-slate-500'
             }`} />
             <span className="text-slate-500">
-              {op.type === 'DELEGATION_CHECK' ? '🛡 Delegation check' :
-               op.type === 'AUDIT_LOG' ? '⛓ Audit VC' :
+              {op.type === 'DELEGATION_CHECK'    ? '🛡 Delegation check' :
+               op.type === 'AUDIT_LOG'           ? `⛓ Audit VC${op.humanApproved ? ' (approved)' : ''}` :
+               op.type === 'HUMAN_APPROVAL_AUDIT'? '👤 Approval VC' :
                op.type}
             </span>
             <span className={`font-mono ml-auto ${
