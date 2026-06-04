@@ -102,6 +102,20 @@ function AuditEntry({ entry, expanded, onToggle }) {
                   <span className="text-green-400">{entry.approvedBy}</span>
                 </div>
               )}
+              {entry.credentialId && (
+                <div>
+                  <span className="text-slate-500">Credential: </span>
+                  <span className="text-purple-400">{entry.credentialId}</span>
+                </div>
+              )}
+              {entry.credDenied !== undefined && (
+                <div>
+                  <span className="text-slate-500">Cred scope: </span>
+                  <span className={entry.credDenied ? 'text-red-400' : 'text-green-400'}>
+                    {entry.credDenied ? 'OUTSIDE SCOPE' : 'IN SCOPE'}
+                  </span>
+                </div>
+              )}
               {entry.simulation && (
                 <div className="text-amber-500">⚠ Simulated — add T3N_API_KEY for live</div>
               )}
@@ -129,7 +143,13 @@ function generateAuditReport(incident, auditTrail) {
     `T3N Mode:       ${incident.agentIdentity?.simulation ? 'SIMULATION' : 'LIVE'}`,
     '',
     '─── DELEGATION CREDENTIALS ──────────────────────────────────',
-    `Delegation VC:  ${incident.agentIdentity?.delegationVcId || 'N/A'}`,
+    `T3N VC:         ${incident.agentIdentity?.delegationVcId || 'N/A'}`,
+    `Phoenix Cred:   ${incident.activeCredential?.credential_id || 'None'}`,
+    ...(incident.activeCredential ? [
+      `Issuer Role:    ${incident.activeCredential.issuer_role}`,
+      `Permissions:    ${incident.activeCredPerms?.length || 0} granted`,
+      `Expires:        ${incident.activeCredential.expires_at}`,
+    ] : []),
     '',
     '─── AUDIT TRAIL (T3N Verified) ──────────────────────────────',
     '',
@@ -218,22 +238,40 @@ export default function AuditTrail({ incident }) {
         )}
       </div>
 
-      {/* Agent DID info */}
+      {/* Agent DID + credential context */}
       {agentStatus && (
-        <div className="px-4 py-2 border-b border-slate-800/60 bg-blue-500/5 flex-shrink-0">
-          <p className="text-[9px] text-slate-500 mb-0.5">Phoenix Agent</p>
-          <p className="text-[10px] text-blue-400 font-mono font-bold break-all">
-            {agentStatus.did}
-          </p>
-          <div className="flex items-center gap-2 mt-1">
-            <T3NCredentialBadge variant="VERIFIED" simulation={simulationMode} />
-            {!simulationMode && <T3NCredentialBadge variant="TEE_CONFIRMED" />}
-            {simulationMode && (
-              <span className="text-[9px] text-slate-600">
-                Simulation — T3N_API_KEY not set
-              </span>
-            )}
+        <div className="px-4 py-2 border-b border-slate-800/60 bg-blue-500/5 flex-shrink-0 space-y-2">
+          <div>
+            <p className="text-[9px] text-slate-500 mb-0.5">Phoenix Agent</p>
+            <p className="text-[10px] text-blue-400 font-mono font-bold break-all">
+              {agentStatus.did}
+            </p>
+            <div className="flex items-center gap-2 mt-1">
+              <T3NCredentialBadge variant="VERIFIED" simulation={simulationMode} />
+              {!simulationMode && <T3NCredentialBadge variant="TEE_CONFIRMED" />}
+              {simulationMode && (
+                <span className="text-[9px] text-slate-600">
+                  Simulation — T3N_API_KEY not set
+                </span>
+              )}
+            </div>
           </div>
+
+          {/* Active delegation credential */}
+          {incident.activeCredential && (
+            <div className="pt-1 border-t border-slate-700/40">
+              <p className="text-[9px] text-slate-500 mb-0.5">Active Delegation Credential</p>
+              <p className="text-[10px] text-purple-400 font-mono font-bold">{incident.activeCredential.credential_id}</p>
+              <p className="text-[9px] text-slate-600 mt-0.5">
+                {incident.activeCredPerms?.length || 0} permissions · issued by {incident.activeCredential.issuer_role}
+              </p>
+            </div>
+          )}
+          {!incident.activeCredential && (
+            <div className="pt-1 border-t border-slate-700/40">
+              <p className="text-[9px] text-amber-500/60">⚠ No delegation credential — visit Authority Center</p>
+            </div>
+          )}
         </div>
       )}
 
