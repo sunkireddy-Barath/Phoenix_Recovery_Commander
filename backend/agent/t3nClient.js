@@ -141,11 +141,16 @@ async function initAgent() {
     agentState.initTimestamp = new Date().toISOString();
     console.log('✅ T3N: Phoenix Agent initialized in LIVE mode — DID:', agentState.did);
   } catch (err) {
-    const is401 = err.response?.status === 401;
-    const reason = is401
-      ? 'T3N API key not authorized for DID/VC endpoints on staging.terminal3.io. Register the DID at https://app.terminal3.io first.'
-      : err.message;
-    console.warn('⚠️  T3N: Live init → simulation mode.');
+    const status = err.response?.status;
+    let reason;
+    if (status === 401 || status === 403) {
+      reason = `T3N API key rejected (HTTP ${status}). Verify T3N_API_KEY in backend/.env is correct and active.`;
+    } else if (status === 404) {
+      reason = 'DID registration failed — check AGENT_DID and AGENT_WALLET_ADDRESS in backend/.env.';
+    } else {
+      reason = err.message;
+    }
+    console.warn('⚠️  T3N: Live init → falling back to SIMULATION mode.');
     console.warn('    Reason:', reason);
     console.warn('    All T3N calls will use simulation responses with identical API structure.');
     agentState.simulationMode = true;
@@ -159,25 +164,66 @@ async function initAgent() {
 }
 
 async function verifyOrRegisterDID() {
+  // ── Step 1: Always try GET /v1/did first ──────────────────────────────────
+  // If a DID already exists for this API key, reuse it — never generate a new one.
+  console.log('[T3N] GET /v1/did — checking for existing DID...');
+  let getRes;
   try {
-    const res = await t3nHttp.get('/v1/did');
-    agentState.did      = res.data.data.did;
-    agentState.verified = true;
-    console.log('✅ T3N: DID verified from T3N registry:', agentState.did);
+    getRes = await t3nHttp.get('/v1/did');
   } catch (err) {
-    if (err.response?.status === 404) {
-      console.log('📝 T3N: DID not found — registering Phoenix Agent DID...');
-      const reg = await t3nHttp.post('/v1/did/register', {
+    const status = err.response?.status;
+    const body   = err.response?.data;
+
+    console.log(`[T3N] GET /v1/did → HTTP ${status ?? 'network error'}`);
+    if (body) console.log('[T3N] Response body:', JSON.stringify(body));
+
+    if (status === 401 || status === 403) {
+      // API key is invalid or lacks permission — no point trying to register
+      const msg = `API key rejected by T3N (HTTP ${status}). Check T3N_API_KEY in backend/.env.`;
+      console.error('[T3N] ✗', msg);
+      throw Object.assign(new Error(msg), { response: err.response });
+    }
+
+    if (status !== 404) {
+      // Unexpected error — surface it directly
+      const msg = err.response?.data?.message || err.message;
+      console.error('[T3N] ✗ Unexpected error on GET /v1/did:', msg);
+      throw err;
+    }
+
+    // ── Step 2: 404 means no DID for this key yet — register one ─────────
+    // Only reached when GET returned 404.
+    console.log('[T3N] No DID found for this API key — registering Phoenix Agent DID...');
+    console.log(`[T3N] POST /v1/did/register  did=${AGENT_DID}  wallet=${AGENT_WALLET}`);
+
+    let reg;
+    try {
+      reg = await t3nHttp.post('/v1/did/register', {
         did:            AGENT_DID,
         wallet_address: AGENT_WALLET
       });
-      agentState.did      = reg.data.data.did;
-      agentState.verified = reg.data.data.success;
-      console.log('✅ T3N: DID registered successfully:', agentState.did);
-    } else {
-      throw err;
+    } catch (regErr) {
+      const rs = regErr.response?.status;
+      const rb = regErr.response?.data;
+      console.error(`[T3N] POST /v1/did/register → HTTP ${rs ?? 'network error'}`);
+      if (rb) console.error('[T3N] Response body:', JSON.stringify(rb));
+      throw regErr;
     }
+
+    console.log(`[T3N] POST /v1/did/register → HTTP 200`);
+    console.log('[T3N] Response body:', JSON.stringify(reg.data));
+    agentState.did      = reg.data.data.did;
+    agentState.verified = reg.data.data.success === true;
+    console.log('[T3N] ✓ DID registered:', agentState.did);
+    return; // done — skip the happy-path below
   }
+
+  // ── Happy path: GET /v1/did returned 200 — reuse existing DID ────────────
+  console.log('[T3N] GET /v1/did → HTTP 200');
+  console.log('[T3N] Response body:', JSON.stringify(getRes.data));
+  agentState.did      = getRes.data.data.did;
+  agentState.verified = true;
+  console.log('[T3N] ✓ Existing DID reused:', agentState.did);
 }
 
 async function storeDelegationVC() {
