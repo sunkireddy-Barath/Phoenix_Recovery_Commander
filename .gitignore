@@ -1,6 +1,12 @@
-# Dependencies
+# Dependencies — never commit installed packages or lock files
 node_modules/
 **/node_modules/
+package-lock.json
+**/package-lock.json
+yarn.lock
+**/yarn.lock
+pnpm-lock.yaml
+**/.pnpm-lock.yaml
 
 # Environment variables — NEVER commit real secrets
 .env
