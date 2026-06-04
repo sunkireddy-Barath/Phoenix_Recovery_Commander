@@ -26,9 +26,11 @@ app.use(helmet({
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:4173').split(',');
 app.use(cors({
   origin: (origin, cb) => {
-    // Allow no-origin (curl, Postman) and localhost during dev
+    // Allow no-origin (curl, Postman) and whitelisted origins
     if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-    cb(new Error(`CORS: origin ${origin} not allowed`));
+    // Reject with null (not an Error) so express returns 204 with no CORS headers,
+    // effectively blocking the browser from reading the response
+    cb(null, false);
   },
   credentials: false
 }));
