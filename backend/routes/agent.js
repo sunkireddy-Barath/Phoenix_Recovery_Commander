@@ -7,204 +7,242 @@ const t3n       = require('../agent/t3nClient');
 const reasoning = require('../agent/reasoningEngine');
 const playbook  = require('../agent/playbook');
 
-// Import incident store from incident routes
-const incidentRoutes = require('./incident');
+const incidentRoutes  = require('./incident');
 const getIncident     = incidentRoutes.getIncident;
 const executeNextStep = incidentRoutes.executeNextStep;
+
+// ─── Input Sanitization ───────────────────────────────────────────────────────
+
+const VALID_APPROVER_ROLES = new Set([
+  'plant_manager', 'supervisor', 'ciso', 'legal',
+  'port_authority', 'harbor_master', 'facility_manager'
+]);
+
+const VALID_ACTION_NAMES = new Set([
+  'ISOLATE_ZONE_4', 'NOTIFY_SAFETY_TEAM', 'SWITCH_BACKUP_COOLING', 'CHECK_BACKUP_POWER',
+  'RESTART_PRIMARY_COOLING', 'NOTIFY_REGULATOR',
+  'ISOLATE_CLUSTER_B', 'SNAPSHOT_CLEAN_STATE', 'NOTIFY_SECURITY_TEAM', 'BLOCK_EXTERNAL_TRAFFIC',
+  'RESTORE_FROM_BACKUP', 'NOTIFY_AFFECTED_CLIENTS',
+  'HALT_BERTH_7_OPERATIONS', 'REDIRECT_VESSELS_BERTH_9', 'DISPATCH_MAINTENANCE_TEAM',
+  'NOTIFY_VESSEL_OPERATORS', 'ENGAGE_BACKUP_CRANE', 'NOTIFY_CUSTOMS_AUTHORITY'
+]);
+
+function sanitizeString(val, maxLen = 120) {
+  if (typeof val !== 'string') return '';
+  // Remove HTML tags and control characters; trim whitespace
+  return val
+    .replace(/<[^>]*>/g, '')
+    .replace(/[\x00-\x1F\x7F]/g, '')
+    .trim()
+    .slice(0, maxLen);
+}
+
+function validateIncidentId(id) {
+  return typeof id === 'string' && /^INC-\d{10,}$/.test(id);
+}
 
 // ─── GET /api/agent/identity ──────────────────────────────────────────────────
 router.get('/identity', async (req, res) => {
   try {
     const identity = await t3n.verifyAgentIdentity();
     const status   = t3n.getAgentStatus();
+    // Merge with status having precedence for named fields
     res.json({ ...identity, ...status });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[agent/identity]', err.message);
+    res.status(500).json({ error: 'Failed to retrieve agent identity' });
   }
 });
 
 // ─── POST /api/agent/approve-escalation ──────────────────────────────────────
 router.post('/approve-escalation', async (req, res) => {
   try {
-    const { incidentId, action, approvedBy, approverRole } = req.body;
-    if (!incidentId || !action || !approvedBy) {
+    const rawIncidentId  = req.body.incidentId;
+    const rawAction      = req.body.action;
+    const rawApprovedBy  = req.body.approvedBy;
+    const rawApproverRole = req.body.approverRole;
+
+    // Validate and sanitize
+    if (!rawIncidentId || !rawAction || !rawApprovedBy) {
       return res.status(400).json({ error: 'incidentId, action, and approvedBy are required' });
+    }
+    if (!validateIncidentId(rawIncidentId)) {
+      return res.status(400).json({ error: 'Invalid incidentId format' });
+    }
+    if (!VALID_ACTION_NAMES.has(rawAction)) {
+      return res.status(400).json({ error: `Invalid action: ${rawAction}` });
+    }
+
+    const incidentId  = rawIncidentId;
+    const action      = rawAction; // already validated from enum
+    const approvedBy  = sanitizeString(rawApprovedBy, 80);
+    const approverRole = VALID_APPROVER_ROLES.has(rawApproverRole) ? rawApproverRole : 'facility_manager';
+
+    if (!approvedBy) {
+      return res.status(400).json({ error: 'approvedBy cannot be empty' });
     }
 
     const incident = getIncident(incidentId);
     if (!incident) return res.status(404).json({ error: 'Incident not found' });
     if (incident.status !== 'blocked') {
-      return res.status(400).json({ error: 'Incident is not in blocked state' });
+      return res.status(409).json({ error: 'Incident is not awaiting approval' });
     }
     if (!incident.pendingEscalation || incident.pendingEscalation.action !== action) {
-      return res.status(400).json({ error: `No pending escalation for action ${action}` });
+      return res.status(409).json({ error: `No pending escalation for action ${action}` });
     }
 
-    console.log(`👤 Human approval: ${action} by ${approvedBy}`);
+    console.log(`👤 T3N: Human approval — ${action} by ${approvedBy} (${approverRole})`);
 
-    // Log human approval as a T3N audit VC
+    // Record human approval as T3N audit VC
     const approvalAudit = await t3n.logAuditTrail(
       'HUMAN_APPROVAL',
       incident.agentIdentity?.did,
       'APPROVED',
-      {
-        incidentId,
-        scenarioId:  incident.scenarioId,
-        approvedBy,
-        approverRole: approverRole || incident.pendingEscalation.approverRole,
-        action,
-        telemetry: incident.telemetry
-      }
+      { incidentId, scenarioId: incident.scenarioId, approvedBy, approverRole, action, telemetry: incident.telemetry }
     );
 
     incident.auditTrail.push({
-      id:          approvalAudit.vcId,
-      type:        'HUMAN_APPROVAL',
-      action:      'HUMAN_APPROVAL',
-      label:       `Approved by ${approvedBy}`,
-      status:      'APPROVED',
+      id:             approvalAudit.vcId,
+      type:           'HUMAN_APPROVAL',
+      action:         'HUMAN_APPROVAL',
+      label:          `Approved by ${approvedBy}`,
+      status:         'APPROVED',
       approvedBy,
-      approverRole: approverRole || incident.pendingEscalation.approverRole,
+      approverRole,
       approvedAction: action,
-      agentDID:    incident.agentIdentity?.did,
-      blockHash:   approvalAudit.block_hash,
-      cid:         approvalAudit.cid,
-      timestamp:   new Date().toISOString(),
-      t3nVerified: approvalAudit.logged,
-      teeVerified: approvalAudit.tee_verified,
-      simulation:  approvalAudit.simulation
+      agentDID:       incident.agentIdentity?.did,
+      blockHash:      approvalAudit.block_hash,
+      cid:            approvalAudit.cid,
+      timestamp:      new Date().toISOString(),
+      t3nVerified:    approvalAudit.logged,
+      teeVerified:    approvalAudit.tee_verified,
+      simulation:     approvalAudit.simulation
     });
 
-    // Find the blocked step in the playbook and mark it as authorized for this execution
+    // Execute the now-approved step
     const blockedStep = incident.scenario.playbook.find(s => s.action === action);
     if (blockedStep) {
-      // Temporarily allow this step execution
       const approvedStep = { ...blockedStep, authorized: true };
-
-      // Execute the step
-      const execResult = playbook.simulateStepExecution(approvedStep, incident.scenario);
+      const execResult   = playbook.simulateStepExecution(approvedStep, incident.scenario);
 
       const execAudit = await t3n.logAuditTrail(
         action,
         incident.agentIdentity?.did,
         'SUCCESS',
-        {
-          incidentId,
-          scenarioId:  incident.scenarioId,
-          stepIndex:   approvedStep.step,
-          approvedBy,
-          approverRole,
-          telemetry:   incident.telemetry
-        }
+        { incidentId, scenarioId: incident.scenarioId, stepIndex: approvedStep.step, approvedBy, approverRole, telemetry: incident.telemetry }
       );
 
-      const stepEntry = {
-        id:          `step-approved-${Date.now()}`,
-        action:      approvedStep.action,
-        label:       approvedStep.label,
-        step:        approvedStep.step,
-        category:    approvedStep.category,
-        status:      'COMPLETE',
-        reasoning:   approvedStep.reasoning,
+      incident.completedSteps.push({
+        id:              `step-approved-${Date.now()}`,
+        action:          approvedStep.action,
+        label:           approvedStep.label,
+        step:            approvedStep.step,
+        category:        approvedStep.category,
+        status:          'COMPLETE',
+        reasoning:       approvedStep.reasoning,
         expectedOutcome: approvedStep.expectedOutcome,
         executionLog:    execResult.log,
-        executedAt:  new Date().toISOString(),
-        t3nVerified: execAudit.logged,
-        teeVerified: execAudit.tee_verified,
-        blockHash:   execAudit.block_hash,
-        vcId:        execAudit.vcId,
-        cid:         execAudit.cid,
-        simulation:  execAudit.simulation,
-        authorized:  true,
-        humanApproved: true,
+        executedAt:      new Date().toISOString(),
+        t3nVerified:     execAudit.logged,
+        teeVerified:     execAudit.tee_verified,
+        blockHash:       execAudit.block_hash,
+        vcId:            execAudit.vcId,
+        cid:             execAudit.cid,
+        simulation:      execAudit.simulation,
+        authorized:      true,
+        humanApproved:   true,
         approvedBy,
         approverRole
-      };
-
-      incident.completedSteps.push(stepEntry);
-
-      incident.auditTrail.push({
-        id:          execAudit.vcId,
-        type:        'ACTION_EXECUTED',
-        action:      approvedStep.action,
-        label:       approvedStep.label,
-        status:      'SUCCESS',
-        agentDID:    incident.agentIdentity?.did,
-        blockHash:   execAudit.block_hash,
-        cid:         execAudit.cid,
-        timestamp:   new Date().toISOString(),
-        t3nVerified: execAudit.logged,
-        teeVerified: execAudit.tee_verified,
-        humanApproved: true,
-        approvedBy,
-        simulation:  execAudit.simulation
       });
 
-      // Update telemetry
-      incident.telemetry = reasoning.computeUpdatedTelemetry(
-        incident.scenario, incident.completedSteps, incident.telemetry
-      );
+      incident.auditTrail.push({
+        id:            execAudit.vcId,
+        type:          'ACTION_EXECUTED',
+        action:        approvedStep.action,
+        label:         approvedStep.label,
+        status:        'SUCCESS',
+        agentDID:      incident.agentIdentity?.did,
+        blockHash:     execAudit.block_hash,
+        cid:           execAudit.cid,
+        timestamp:     new Date().toISOString(),
+        t3nVerified:   execAudit.logged,
+        teeVerified:   execAudit.tee_verified,
+        humanApproved: true,
+        approvedBy,
+        simulation:    execAudit.simulation
+      });
+
+      incident.telemetry = reasoning.computeUpdatedTelemetry(incident.scenario, incident.completedSteps, incident.telemetry);
       incident.telemetryHistory.push({ timestamp: Date.now(), ...incident.telemetry });
       incident.recoveryProgress = reasoning.computeRecoveryProgress(incident.scenario, incident.completedSteps);
     }
 
-    // Clear blocked state and resume
     incident.pendingEscalation = null;
     incident.status = 'executing';
-    incident.phase  = 'Resuming after human approval...';
+    incident.phase  = `Approved by ${approvedBy} — Resuming recovery...`;
 
-    // Resume execution loop
     setTimeout(() => executeNextStep(incidentId), 2500);
 
-    res.json({
-      success:     true,
-      message:     `Action ${action} approved and executed`,
-      approvalAudit,
-      incidentStatus: incident.status
-    });
+    res.json({ success: true, message: `${action} approved and executed`, approvalAudit });
   } catch (err) {
-    console.error('approve-escalation error:', err);
-    res.status(500).json({ error: err.message });
+    console.error('[approve-escalation]', err.message);
+    res.status(500).json({ error: 'Approval failed — see server logs' });
   }
 });
 
 // ─── POST /api/agent/reject-escalation ───────────────────────────────────────
 router.post('/reject-escalation', async (req, res) => {
   try {
-    const { incidentId, action, rejectedBy, reason } = req.body;
+    const rawIncidentId = req.body.incidentId;
+    const rawAction     = req.body.action;
+    const rawRejectedBy = req.body.rejectedBy;
+    const rawReason     = req.body.reason;
+
+    if (!rawIncidentId || !rawAction) {
+      return res.status(400).json({ error: 'incidentId and action are required' });
+    }
+    if (!validateIncidentId(rawIncidentId)) {
+      return res.status(400).json({ error: 'Invalid incidentId format' });
+    }
+    if (!VALID_ACTION_NAMES.has(rawAction)) {
+      return res.status(400).json({ error: `Invalid action: ${rawAction}` });
+    }
+
+    const incidentId = rawIncidentId;
+    const action     = rawAction;
+    const rejectedBy = sanitizeString(rawRejectedBy || 'Unknown', 80);
+    const reason     = sanitizeString(rawReason || 'No reason provided', 240);
 
     const incident = getIncident(incidentId);
     if (!incident) return res.status(404).json({ error: 'Incident not found' });
 
-    // Log rejection
     const rejectAudit = await t3n.logAuditTrail(
-      'HUMAN_REJECTION',
-      incident.agentIdentity?.did,
-      'REJECTED',
+      'HUMAN_REJECTION', incident.agentIdentity?.did, 'REJECTED',
       { incidentId, action, rejectedBy, reason }
     );
 
     incident.auditTrail.push({
-      id:          rejectAudit.vcId,
-      type:        'HUMAN_REJECTION',
-      action:      'HUMAN_REJECTION',
-      label:       `Rejected by ${rejectedBy}`,
-      status:      'REJECTED',
+      id:             rejectAudit.vcId,
+      type:           'HUMAN_REJECTION',
+      action:         'HUMAN_REJECTION',
+      label:          `Rejected by ${rejectedBy}`,
+      status:         'REJECTED',
       rejectedBy,
       rejectedAction: action,
       reason,
-      timestamp:   new Date().toISOString(),
-      t3nVerified: rejectAudit.logged,
-      simulation:  rejectAudit.simulation
+      timestamp:      new Date().toISOString(),
+      t3nVerified:    rejectAudit.logged,
+      simulation:     rejectAudit.simulation
     });
 
     incident.pendingEscalation = null;
     incident.status = 'blocked';
     incident.phase  = `Step rejected by ${rejectedBy}. Manual intervention required.`;
 
-    res.json({ success: true, message: `Action ${action} rejected` });
+    res.json({ success: true, message: `${action} rejected and recorded in T3N audit trail` });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[reject-escalation]', err.message);
+    res.status(500).json({ error: 'Rejection failed — see server logs' });
   }
 });
 
@@ -213,11 +251,20 @@ router.post('/replan', async (req, res) => {
   try {
     const { incidentId, newTelemetry } = req.body;
 
+    if (!incidentId || !validateIncidentId(incidentId)) {
+      return res.status(400).json({ error: 'Valid incidentId is required' });
+    }
+
     const incident = getIncident(incidentId);
     if (!incident) return res.status(404).json({ error: 'Incident not found' });
 
-    if (newTelemetry) {
-      incident.telemetry = { ...incident.telemetry, ...newTelemetry };
+    if (newTelemetry && typeof newTelemetry === 'object') {
+      // Only allow numeric telemetry values
+      const safeTelemetry = {};
+      for (const [k, v] of Object.entries(newTelemetry)) {
+        if (typeof v === 'number' && isFinite(v)) safeTelemetry[k] = v;
+      }
+      incident.telemetry = { ...incident.telemetry, ...safeTelemetry };
       incident.telemetryHistory.push({ timestamp: Date.now(), ...incident.telemetry });
     }
 
@@ -227,7 +274,8 @@ router.post('/replan', async (req, res) => {
 
     res.json({ success: true, plan: newPlan, telemetry: incident.telemetry });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[replan]', err.message);
+    res.status(500).json({ error: 'Replan failed' });
   }
 });
 
