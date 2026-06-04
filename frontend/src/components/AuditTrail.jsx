@@ -198,7 +198,8 @@ export default function AuditTrail({ incident }) {
 
   const trail = incident.auditTrail || [];
   const agentStatus = incident.agentIdentity;
-  const simulationMode = agentStatus?.simulation !== false;
+  // Support both field names: simulationMode (from getAgentStatus) and simulation (from verifyAgentIdentity)
+  const simulationMode = agentStatus?.simulationMode !== false && agentStatus?.simulation !== false;
 
   return (
     <div className="flex flex-col h-full min-h-0">
