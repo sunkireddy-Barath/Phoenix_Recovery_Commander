@@ -6,10 +6,19 @@ const express    = require('express');
 const cors       = require('cors');
 const helmet     = require('helmet');
 const rateLimit  = require('express-rate-limit');
+const session    = require('express-session');
 
-const t3n            = require('./agent/t3nClient');
-const incidentRoutes = require('./routes/incident');
-const agentRoutes    = require('./routes/agent');
+const t3n              = require('./agent/t3nClient');
+const incidentRoutes   = require('./routes/incident');
+const agentRoutes      = require('./routes/agent');
+const authRoutes       = require('./routes/auth');
+const authorityRoutes  = require('./routes/authority');
+const agentsDbRoutes   = require('./routes/agentsDb');
+const credentialRoutes = require('./routes/credentials');
+const permissionRoutes = require('./routes/permissionsRoute');
+
+// Initialise DB (creates tables + seeds on first run)
+require('./db/database').getDb();
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -22,17 +31,26 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false
 }));
 
+// Session middleware (must be before CORS so Set-Cookie is sent)
+app.use(session({
+  secret:            process.env.SESSION_SECRET || 'phoenix-secret-change-me',
+  resave:            false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    sameSite: 'lax',
+    maxAge:   7 * 24 * 60 * 60 * 1000 // 7 days
+  }
+}));
+
 // CORS: allow only known origins
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:4173').split(',');
 app.use(cors({
   origin: (origin, cb) => {
-    // Allow no-origin (curl, Postman) and whitelisted origins
     if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-    // Reject with null (not an Error) so express returns 204 with no CORS headers,
-    // effectively blocking the browser from reading the response
     cb(null, false);
   },
-  credentials: false
+  credentials: true
 }));
 
 // Body parsing with size limit to prevent abuse
@@ -65,8 +83,13 @@ app.use((req, _res, next) => {
 });
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
-app.use('/api/incident', incidentRoutes);
-app.use('/api/agent',    agentRoutes);
+app.use('/api/auth',        authRoutes);
+app.use('/api/authority',   authorityRoutes);
+app.use('/api/agents',      agentsDbRoutes);
+app.use('/api/credentials', credentialRoutes);
+app.use('/api/permissions', permissionRoutes);
+app.use('/api/incident',    incidentRoutes);
+app.use('/api/agent',       agentRoutes);
 
 app.get('/health', (_req, res) => {
   res.json({
