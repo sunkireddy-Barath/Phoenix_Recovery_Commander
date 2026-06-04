@@ -125,9 +125,9 @@ const SCENARIOS = [
       recovery_progress: 0
     },
     telemetryLimits: {
-      affected_nodes:       { danger: 10, unit: ' nodes', label: 'Affected Nodes', invertedDanger: false },
-      encryption_progress:  { danger: 50, unit: '%', label: 'Encryption Progress', invertedDanger: false },
-      network_traffic:      { danger: 500, unit: ' MB/s', label: 'Network Traffic', invertedDanger: false }
+      affected_nodes:       { danger: 5,  unit: ' nodes', label: 'Affected Nodes', invertedDanger: false },
+      encryption_progress:  { danger: 1,  unit: '%',     label: 'Encryption Progress', invertedDanger: false },
+      network_traffic:      { danger: 500, unit: ' MB/s', label: 'Network Traffic',     invertedDanger: false }
     },
     telemetryTargets: {
       affected_nodes: 0,
@@ -226,7 +226,7 @@ const SCENARIOS = [
     telemetry: {
       affected_vessels: 4,
       cargo_delayed_tons: 2400,
-      berth_utilization: 0,
+      berth_utilization: 18,  // Berth 7 partially operational on other berths; 18% vs normal 85%
       recovery_progress: 0
     },
     telemetryLimits: {

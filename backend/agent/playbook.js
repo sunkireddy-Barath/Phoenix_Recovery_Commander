@@ -98,21 +98,53 @@ function getScenario(scenarioId) {
 }
 
 function getAllScenarios() {
-  return SCENARIOS.map(s => ({
-    id:          s.id,
-    title:       s.title,
-    facility:    s.facility,
-    facilityType: s.facilityType,
-    icon:        s.icon,
-    severity:    s.severity,
-    costPerMinute: s.costPerMinute,
-    description: s.description,
-    telemetry:   s.telemetry,
-    telemetryLimits: s.telemetryLimits,
-    playbookLength: s.playbook.length,
-    authorizedSteps: s.playbook.filter(p => p.authorized).length,
-    blockedSteps:    s.playbook.filter(p => !p.authorized).length
-  }));
+  return SCENARIOS.map(s => {
+    // Build display metrics from telemetry + limits for the UI cards
+    const displayMetrics = Object.entries(s.telemetryLimits).map(([key, cfg]) => ({
+      key,
+      label:       cfg.label,
+      value:       formatTelemetryValue(s.telemetry[key], cfg.unit),
+      rawValue:    s.telemetry[key],
+      limit:       `${cfg.danger}${cfg.unit}`,
+      danger:      cfg.invertedDanger
+        ? (s.telemetry[key] < cfg.danger)
+        : (s.telemetry[key] > cfg.danger)
+    }));
+
+    return {
+      id:              s.id,
+      title:           s.title,
+      facility:        s.facility,
+      facilityType:    s.facilityType,
+      icon:            s.icon,
+      severity:        s.severity,
+      costPerMinute:   s.costPerMinute,
+      description:     s.description,
+      telemetry:       s.telemetry,
+      telemetryLimits: s.telemetryLimits,
+      displayMetrics,
+      playbookLength:  s.playbook.length,
+      authorizedSteps: s.playbook.filter(p => p.authorized).length,
+      blockedSteps:    s.playbook.filter(p => !p.authorized).length,
+      playbook:        s.playbook.map(p => ({
+        step:         p.step,
+        action:       p.action,
+        label:        p.label,
+        authorized:   p.authorized,
+        category:     p.category,
+        approver:     p.approver || null,
+        approverRole: p.approverRole || null
+      }))
+    };
+  });
+}
+
+function formatTelemetryValue(val, unit) {
+  if (val == null) return 'N/A';
+  if (typeof val === 'number') {
+    return `${val.toLocaleString()}${unit}`;
+  }
+  return `${val}${unit}`;
 }
 
 module.exports = {

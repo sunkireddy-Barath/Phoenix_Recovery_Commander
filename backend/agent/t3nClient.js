@@ -203,36 +203,39 @@ async function verifyAgentIdentity() {
 
   if (agentState.simulationMode) {
     return {
-      verified:     true,
-      did:          agentState.did,
-      timestamp:    ts,
-      tee_verified: true,
-      block_hash:   randomHex(32),
-      method:       'did:key',
-      simulation:   true
+      verified:       true,
+      did:            agentState.did,
+      timestamp:      ts,
+      tee_verified:   true,
+      block_hash:     randomHex(32),
+      method:         'did:key',
+      simulation:     true,
+      simulationMode: true   // consistent field for frontend checks
     };
   }
 
   try {
     const res = await t3nHttp.get('/v1/did');
     return {
-      verified:     true,
-      did:          res.data.data.did,
-      timestamp:    ts,
-      tee_verified: true,
-      block_hash:   randomHex(32),
-      method:       'did:key',
-      simulation:   false
+      verified:       true,
+      did:            res.data.data.did,
+      timestamp:      ts,
+      tee_verified:   true,
+      block_hash:     randomHex(32),
+      method:         'did:key',
+      simulation:     false,
+      simulationMode: false
     };
   } catch (err) {
     console.warn('T3N verifyAgentIdentity failed:', err.message);
     return {
-      verified:     false,
-      did:          agentState.did,
-      timestamp:    ts,
-      tee_verified: false,
-      error:        err.message,
-      simulation:   true
+      verified:       false,
+      did:            agentState.did,
+      timestamp:      ts,
+      tee_verified:   false,
+      error:          err.message,
+      simulation:     true,
+      simulationMode: true
     };
   }
 }

@@ -4,33 +4,61 @@ const express  = require('express');
 const { v4: uuidv4 } = require('uuid');
 const router   = express.Router();
 
-const t3n          = require('../agent/t3nClient');
-const reasoning    = require('../agent/reasoningEngine');
-const playbook     = require('../agent/playbook');
+const t3n       = require('../agent/t3nClient');
+const reasoning = require('../agent/reasoningEngine');
+const playbook  = require('../agent/playbook');
 
-// In-memory incident store — keyed by incidentId
-const incidentStore = new Map();
+// ─── In-Memory Incident Store with TTL ───────────────────────────────────────
 
-// ─── Incident Store Accessors (shared with agent routes) ──────────────────────
+const incidentStore = new Map(); // incidentId → IncidentState
+
+// Clean up incidents older than 2 hours to prevent memory leak
+const INCIDENT_TTL_MS = 2 * 60 * 60 * 1000;
+setInterval(() => {
+  const cutoff = Date.now() - INCIDENT_TTL_MS;
+  for (const [id, inc] of incidentStore.entries()) {
+    const age = new Date(inc.startTime).getTime();
+    if (age < cutoff) {
+      incidentStore.delete(id);
+      console.log(`[TTL] Evicted stale incident ${id}`);
+    }
+  }
+}, 30 * 60 * 1000); // run every 30 min
+
 function getIncident(id)       { return incidentStore.get(id); }
-function setIncident(id, data) { incidentStore.set(id, data);  }
+function setIncident(id, data) { incidentStore.set(id, data); }
 
 // ─── POST /api/incident/start ─────────────────────────────────────────────────
 router.post('/start', async (req, res) => {
   try {
     const { scenarioId } = req.body;
-    if (!scenarioId) return res.status(400).json({ error: 'scenarioId is required' });
+    if (!scenarioId || typeof scenarioId !== 'string') {
+      return res.status(400).json({ error: 'scenarioId is required' });
+    }
 
-    const scenario = playbook.getScenario(scenarioId);
+    const VALID_SCENARIOS = new Set(['INC-001', 'INC-002', 'INC-003']);
+    if (!VALID_SCENARIOS.has(scenarioId)) {
+      return res.status(400).json({ error: `Invalid scenarioId. Must be one of: ${[...VALID_SCENARIOS].join(', ')}` });
+    }
+
+    // Limit concurrent active incidents per session (prevent resource exhaustion)
+    let activeCount = 0;
+    for (const inc of incidentStore.values()) {
+      if (inc.status !== 'complete' && inc.status !== 'cancelled') activeCount++;
+    }
+    if (activeCount >= 5) {
+      return res.status(429).json({ error: 'Too many active incidents. Cancel existing incidents first.' });
+    }
+
+    const scenario   = playbook.getScenario(scenarioId);
     if (!scenario) return res.status(404).json({ error: `Scenario ${scenarioId} not found` });
 
     const incidentId = `INC-${Date.now()}`;
 
-    // T3N Gatekeeper Step 1: Verify agent identity
+    // ── T3N Gatekeeper: Verify agent identity before starting ───────────────
     console.log(`🔐 T3N: Verifying Phoenix Agent identity for incident ${incidentId}...`);
     const agentIdentity = await t3n.verifyAgentIdentity();
 
-    // Run rule-based reasoning engine
     const plan = reasoning.analyzeIncident(scenario, scenario.telemetry);
     plan.incidentId = incidentId;
 
@@ -39,7 +67,7 @@ router.post('/start', async (req, res) => {
       scenarioId,
       scenario:          { ...scenario },
       status:            'executing',
-      phase:             'Agent analyzing situation...',
+      phase:             'Agent analyzing situation — T3N identity verified',
       completedSteps:    [],
       pendingEscalation: null,
       auditTrail:        [],
@@ -50,25 +78,22 @@ router.post('/start', async (req, res) => {
       plan,
       agentIdentity,
       startTime:         new Date().toISOString(),
-      completeTime:      null,
-      costAccrued:       0
+      completeTime:      null
     };
 
     setIncident(incidentId, incident);
-
-    // Kick off async step execution (non-blocking)
     setImmediate(() => executeNextStep(incidentId));
 
     res.json({
       incidentId,
-      incident: sanitizeIncident(incident),
+      incident:  sanitizeIncident(incident),
       agentIdentity,
       plan,
       t3nStatus: t3n.getAgentStatus()
     });
   } catch (err) {
-    console.error('incident/start error:', err);
-    res.status(500).json({ error: err.message });
+    console.error('[incident/start]', err.message);
+    res.status(500).json({ error: 'Failed to start incident' });
   }
 });
 
@@ -77,6 +102,43 @@ router.get('/status/:id', (req, res) => {
   const incident = getIncident(req.params.id);
   if (!incident) return res.status(404).json({ error: 'Incident not found' });
   res.json(sanitizeIncident(incident));
+});
+
+// ─── POST /api/incident/cancel ────────────────────────────────────────────────
+router.post('/cancel', (req, res) => {
+  const { incidentId } = req.body;
+  if (!incidentId) return res.status(400).json({ error: 'incidentId is required' });
+
+  const incident = getIncident(incidentId);
+  if (!incident) return res.status(404).json({ error: 'Incident not found' });
+  if (incident.status === 'complete') {
+    return res.status(409).json({ error: 'Cannot cancel a completed incident' });
+  }
+
+  incident.status       = 'cancelled';
+  incident.phase        = 'Cancelled by operator';
+  incident.completeTime = new Date().toISOString();
+
+  console.log(`🛑 Incident ${incidentId} cancelled by operator`);
+  res.json({ success: true, message: `Incident ${incidentId} cancelled` });
+});
+
+// ─── GET /api/incident/active ─────────────────────────────────────────────────
+router.get('/active', (_req, res) => {
+  const active = [];
+  for (const [id, inc] of incidentStore.entries()) {
+    if (inc.status !== 'complete' && inc.status !== 'cancelled') {
+      active.push({
+        id,
+        scenarioId:    inc.scenarioId,
+        scenarioTitle: inc.scenario.title,
+        status:        inc.status,
+        progress:      inc.recoveryProgress,
+        startTime:     inc.startTime
+      });
+    }
+  }
+  res.json(active);
 });
 
 // ─── GET /api/incident/audit-trail/:id ───────────────────────────────────────
@@ -95,7 +157,7 @@ router.get('/audit-trail/:id', (req, res) => {
 });
 
 // ─── GET /api/incident/scenarios ─────────────────────────────────────────────
-router.get('/scenarios', (req, res) => {
+router.get('/scenarios', (_req, res) => {
   res.json(playbook.getAllScenarios());
 });
 
@@ -103,21 +165,20 @@ router.get('/scenarios', (req, res) => {
 
 async function executeNextStep(incidentId) {
   const incident = getIncident(incidentId);
-  if (!incident || incident.status === 'complete' || incident.status === 'cancelled') return;
-  if (incident.status === 'blocked') return; // Waiting for human approval
+  if (!incident) return;
+  if (incident.status === 'complete' || incident.status === 'cancelled') return;
+  if (incident.status === 'blocked') return;
 
   const nextStep = playbook.getNextStep(incident.scenario, incident.completedSteps);
   if (!nextStep) {
-    // All steps complete
     finalizeIncident(incidentId);
     return;
   }
 
-  incident.phase = `T3N validating delegation for: ${nextStep.action}`;
+  incident.phase = `T3N: Checking delegation for ${nextStep.action}...`;
 
-  // ── T3N Gatekeeper Flow ──────────────────────────────────────────────────
+  // ── T3N Gatekeeper Step 1: Delegation proof ──────────────────────────────
 
-  // Step 1: T3N delegation check
   incident.t3nOperations.push({
     type:      'DELEGATION_CHECK',
     status:    'PENDING',
@@ -125,7 +186,7 @@ async function executeNextStep(incidentId) {
     timestamp: new Date().toISOString()
   });
 
-  console.log(`🔐 T3N: Checking delegation for ${nextStep.action}...`);
+  console.log(`🔐 T3N: Delegation check — ${nextStep.action}`);
   const delegResult = await t3n.checkDelegationAuthority(nextStep.action);
 
   incident.t3nOperations[incident.t3nOperations.length - 1] = {
@@ -139,10 +200,12 @@ async function executeNextStep(incidentId) {
     timestamp:   new Date().toISOString()
   };
 
-  // Step 2: If not authorized → block and wait for human
-  if (!nextStep.authorized) {
+  // ── T3N Gatekeeper Step 2: Block if not in delegation scope ──────────────
+  // CRITICAL: T3N delegation result is the AUTHORITATIVE source — not just the playbook flag.
+  // Both must agree: T3N says authorized AND playbook says authorized.
+  if (!delegResult.authorized || !nextStep.authorized) {
     incident.status = 'blocked';
-    incident.phase  = `Awaiting approval: ${nextStep.action}`;
+    incident.phase  = `Delegation boundary: ${nextStep.action} requires human approval`;
     incident.pendingEscalation = {
       action:      nextStep.action,
       label:       nextStep.label,
@@ -152,7 +215,8 @@ async function executeNextStep(incidentId) {
       approverRole: nextStep.approverRole,
       stepIndex:   nextStep.step,
       urgency:     'HIGH',
-      blockedAt:   new Date().toISOString()
+      blockedAt:   new Date().toISOString(),
+      t3nDenied:   !delegResult.authorized
     };
 
     incident.auditTrail.push({
@@ -164,22 +228,22 @@ async function executeNextStep(incidentId) {
       reason:      nextStep.reason,
       approver:    nextStep.approver,
       agentDID:    incident.agentIdentity?.did,
+      t3nDenied:   !delegResult.authorized,
       timestamp:   new Date().toISOString(),
       t3nVerified: true,
       simulation:  delegResult.simulation
     });
 
-    console.log(`🔒 Step ${nextStep.step} BLOCKED: ${nextStep.action} — requires ${nextStep.approver} approval`);
+    console.log(`🔒 T3N DENIED: ${nextStep.action} — escalating to ${nextStep.approver}`);
     return;
   }
 
-  // Step 3: Execute action
+  // ── Execute action ────────────────────────────────────────────────────────
   incident.phase = `Executing: ${nextStep.action}`;
   await new Promise(r => setTimeout(r, (nextStep.executionSeconds || 3) * 1000));
-
   const execResult = playbook.simulateStepExecution(nextStep, incident.scenario);
 
-  // Step 4: T3N audit trail recording
+  // ── T3N Gatekeeper Step 3: Record tamper-proof audit VC ──────────────────
   incident.t3nOperations.push({
     type:      'AUDIT_LOG',
     status:    'LOGGING',
@@ -192,50 +256,46 @@ async function executeNextStep(incidentId) {
     incident.agentIdentity?.did,
     execResult.success ? 'SUCCESS' : 'FAILURE',
     {
-      incidentId:  incidentId,
-      scenarioId:  incident.scenarioId,
-      facilityId:  incident.scenario.facility,
-      stepIndex:   nextStep.step,
-      telemetry:   incident.telemetry
+      incidentId, scenarioId: incident.scenarioId,
+      facilityId: incident.scenario.facility,
+      stepIndex:  nextStep.step,
+      telemetry:  incident.telemetry
     }
   );
 
   incident.t3nOperations[incident.t3nOperations.length - 1] = {
-    type:        'AUDIT_LOG',
-    status:      'LOGGED',
-    action:      nextStep.action,
-    vcId:        auditResult.vcId,
-    cid:         auditResult.cid,
-    block_hash:  auditResult.block_hash,
-    simulation:  auditResult.simulation,
-    timestamp:   new Date().toISOString()
+    type:       'AUDIT_LOG',
+    status:     'LOGGED',
+    action:     nextStep.action,
+    vcId:       auditResult.vcId,
+    cid:        auditResult.cid,
+    block_hash: auditResult.block_hash,
+    simulation: auditResult.simulation,
+    timestamp:  new Date().toISOString()
   };
 
-  // Step 5: Record completed step
-  const stepEntry = {
-    id:          `step-${Date.now()}`,
-    action:      nextStep.action,
-    label:       nextStep.label,
-    step:        nextStep.step,
-    category:    nextStep.category,
-    status:      'COMPLETE',
-    reasoning:   reasoning.getStepReasoning(incident.scenario, nextStep, incident.telemetry, incident.completedSteps),
+  // Record completed step
+  incident.completedSteps.push({
+    id:              `step-${Date.now()}`,
+    action:          nextStep.action,
+    label:           nextStep.label,
+    step:            nextStep.step,
+    category:        nextStep.category,
+    status:          'COMPLETE',
+    reasoning:       reasoning.getStepReasoning(incident.scenario, nextStep, incident.telemetry, incident.completedSteps),
     expectedOutcome: nextStep.expectedOutcome,
     executionLog:    execResult.log,
-    executedAt:  new Date().toISOString(),
-    t3nVerified: auditResult.logged,
-    teeVerified: auditResult.tee_verified,
-    blockHash:   auditResult.block_hash,
-    vcId:        auditResult.vcId,
-    cid:         auditResult.cid,
-    simulation:  auditResult.simulation,
-    delegProof:  delegResult.proof,
-    authorized:  true
-  };
+    executedAt:      new Date().toISOString(),
+    t3nVerified:     auditResult.logged,
+    teeVerified:     auditResult.tee_verified,
+    blockHash:       auditResult.block_hash,
+    vcId:            auditResult.vcId,
+    cid:             auditResult.cid,
+    simulation:      auditResult.simulation,
+    delegProof:      delegResult.proof,
+    authorized:      true
+  });
 
-  incident.completedSteps.push(stepEntry);
-
-  // Add to audit trail
   incident.auditTrail.push({
     id:          auditResult.vcId,
     type:        'ACTION_EXECUTED',
@@ -251,16 +311,14 @@ async function executeNextStep(incidentId) {
     simulation:  auditResult.simulation
   });
 
-  // Update telemetry
-  incident.telemetry = reasoning.computeUpdatedTelemetry(
-    incident.scenario, incident.completedSteps, incident.telemetry
-  );
+  // Update telemetry + progress
+  incident.telemetry = reasoning.computeUpdatedTelemetry(incident.scenario, incident.completedSteps, incident.telemetry);
   incident.telemetryHistory.push({ timestamp: Date.now(), ...incident.telemetry });
   incident.recoveryProgress = reasoning.computeRecoveryProgress(incident.scenario, incident.completedSteps);
 
-  console.log(`✅ Step ${nextStep.step} complete: ${nextStep.action}`);
+  console.log(`✅ Step ${nextStep.step} complete: ${nextStep.action} — progress: ${incident.recoveryProgress}%`);
 
-  // Schedule next step
+  // Schedule next step with a short pause
   setTimeout(() => executeNextStep(incidentId), 3200);
 }
 
@@ -268,16 +326,19 @@ function finalizeIncident(incidentId) {
   const incident = getIncident(incidentId);
   if (!incident) return;
 
-  incident.status       = 'complete';
-  incident.phase        = 'Recovery complete';
-  incident.completeTime = new Date().toISOString();
+  const endTime  = new Date();
+  const startMs  = new Date(incident.startTime).getTime();
+  const durationMs = endTime.getTime() - startMs;
+  const mins = Math.max(1, Math.round(durationMs / 60000));
+
+  incident.status           = 'complete';
+  incident.phase            = 'Recovery complete — all actions verified by T3N';
+  incident.completeTime     = endTime.toISOString();
   incident.recoveryProgress = 100;
-  incident.telemetry    = { ...incident.scenario.telemetryTargets };
+  incident.telemetry        = { ...incident.scenario.telemetryTargets };
+  incident.recovery         = reasoning.estimateCostSaved(incident.scenario, mins);
 
-  const mins = Math.round((new Date(incident.completeTime) - new Date(incident.startTime)) / 60000);
-  incident.recovery = reasoning.estimateCostSaved(incident.scenario, mins);
-
-  console.log(`🎉 Incident ${incidentId} COMPLETE — ${mins} minutes`);
+  console.log(`🎉 Incident ${incidentId} COMPLETE — ${mins} min | Saved: $${incident.recovery.costSaved.toLocaleString()}`);
 }
 
 function sanitizeIncident(inc) {
@@ -308,8 +369,7 @@ function sanitizeIncident(inc) {
   };
 }
 
-// Export store accessors for use in agent routes
 module.exports = router;
-module.exports.getIncident    = getIncident;
-module.exports.setIncident    = setIncident;
+module.exports.getIncident     = getIncident;
+module.exports.setIncident     = setIncident;
 module.exports.executeNextStep = executeNextStep;
