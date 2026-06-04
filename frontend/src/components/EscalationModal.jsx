@@ -48,7 +48,7 @@ const DEFAULT_APPROVER = {
   avatar: '👤'
 };
 
-export default function EscalationModal({ escalation, incidentId, onApprove, onReject, simulation }) {
+export default function EscalationModal({ escalation, incidentId, onApprove, onReject, simulation, authority }) {
   const [approving, setApproving] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [t3nStatus, setT3NStatus] = useState(null);
@@ -118,19 +118,49 @@ export default function EscalationModal({ escalation, incidentId, onApprove, onR
             </p>
           </div>
 
+          {/* Authority + Credential context */}
+          {(authority || escalation.credential) && (
+            <div className="bg-purple-500/5 border border-purple-500/20 rounded-lg p-3">
+              <div className="flex items-center gap-2 mb-2">
+                <User size={12} className="text-purple-400" />
+                <p className="text-[10px] text-purple-400 font-bold uppercase tracking-wider">
+                  Authority Delegation Chain
+                </p>
+              </div>
+              <div className="space-y-1 text-[10px]">
+                {authority && (
+                  <p className="text-slate-400">
+                    Issuing authority: <span className="text-purple-300 font-bold">{authority.name}</span>
+                    <span className="text-slate-600 ml-1">({authority.authority_level})</span>
+                  </p>
+                )}
+                {escalation.credential && (
+                  <p className="text-slate-400">
+                    Active credential: <span className="text-blue-400 font-mono">{escalation.credential}</span>
+                  </p>
+                )}
+                <p className="text-slate-500">
+                  {escalation.credDenied
+                    ? `Action "${escalation.action}" is outside the delegated permission scope.`
+                    : `Action requires elevated authority beyond current delegation.`}
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* T3N delegation explanation */}
           <div className="bg-blue-500/5 border border-blue-500/20 rounded-lg p-3">
             <div className="flex items-center gap-2 mb-2">
               <Shield size={12} className="text-blue-400" />
               <p className="text-[10px] text-blue-400 font-bold uppercase tracking-wider">
-                Why T3N Blocked This Action
+                Why This Action Is Blocked
               </p>
             </div>
             <p className="text-[10px] text-slate-400 leading-relaxed">
-              The Phoenix Agent's delegation VC (Terminal 3 Verifiable Credential) explicitly
-              excludes <strong className="text-slate-300">{escalation.action}</strong> from
-              its authorized action scope. T3N's selective disclosure proof confirmed the agent
-              is operating within its delegation boundary.
+              {escalation.credDenied
+                ? <>The active delegation credential does not include <strong className="text-slate-300">{escalation.action}</strong>. The Phoenix Agent is enforcing its permission scope. T3N verified this boundary.</>
+                : <>The Phoenix Agent's delegation VC (Terminal 3 Verifiable Credential) explicitly excludes <strong className="text-slate-300">{escalation.action}</strong> from its authorized action scope. T3N's selective disclosure proof confirmed the agent is operating within its delegation boundary.</>
+              }
             </p>
             <div className="flex gap-1.5 mt-2 flex-wrap">
               <T3NCredentialBadge variant="VERIFIED" simulation={simulation} />
