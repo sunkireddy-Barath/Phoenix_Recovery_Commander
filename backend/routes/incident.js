@@ -7,6 +7,8 @@ const router   = express.Router();
 const t3n       = require('../agent/t3nClient');
 const reasoning = require('../agent/reasoningEngine');
 const playbook  = require('../agent/playbook');
+const { checkCredentialPermission, recordAuditEvent, SCENARIO_AGENT_MAP } = require('../middleware/checkPermission');
+const { getActiveCredential } = require('../db/database');
 
 // ─── In-Memory Incident Store with TTL ───────────────────────────────────────
 
@@ -62,6 +64,22 @@ router.post('/start', async (req, res) => {
     const plan = reasoning.analyzeIncident(scenario, scenario.telemetry);
     plan.incidentId = incidentId;
 
+    // ── Credential lookup for permission enforcement ────────────────────────
+    const agentId   = SCENARIO_AGENT_MAP[scenarioId] || null;
+    const activeCred = agentId ? getActiveCredential(agentId) : null;
+    let activeCredPerms = [];
+    if (activeCred) {
+      try { activeCredPerms = JSON.parse(activeCred.permissions); } catch {}
+    }
+
+    recordAuditEvent({
+      agent:        agentIdentity?.did,
+      credentialId: activeCred?.credential_id || null,
+      action:       'INCIDENT_STARTED',
+      result:       'SUCCESS',
+      metadata:     { incidentId, scenarioId, agentId, credentialId: activeCred?.credential_id }
+    });
+
     const incident = {
       id:                incidentId,
       scenarioId,
@@ -77,6 +95,9 @@ router.post('/start', async (req, res) => {
       recoveryProgress:  0,
       plan,
       agentIdentity,
+      agentId,
+      activeCredential:  activeCred || null,
+      activeCredPerms,
       startTime:         new Date().toISOString(),
       completeTime:      null
     };
@@ -200,23 +221,34 @@ async function executeNextStep(incidentId) {
     timestamp:   new Date().toISOString()
   };
 
+  // ── Credential Permission Check (Phoenix Authority platform) ────────────
+  // Refresh the active credential in case it changed since incident start
+  const credCheck = checkCredentialPermission(incident.scenarioId, nextStep.action);
+
   // ── T3N Gatekeeper Step 2: Block if not in delegation scope ──────────────
-  // CRITICAL: T3N delegation result is the AUTHORITATIVE source — not just the playbook flag.
-  // Both must agree: T3N says authorized AND playbook says authorized.
-  if (!delegResult.authorized || !nextStep.authorized) {
+  // CRITICAL: T3N AND credential checks both must pass.
+  const credDenied = !credCheck.permitted;
+  if (!delegResult.authorized || !nextStep.authorized || credDenied) {
     incident.status = 'blocked';
     incident.phase  = `Delegation boundary: ${nextStep.action} requires human approval`;
+
+    const blockReason = credDenied
+      ? `Outside credential scope: ${credCheck.reason}`
+      : nextStep.reason;
+
     incident.pendingEscalation = {
-      action:      nextStep.action,
-      label:       nextStep.label,
-      reason:      nextStep.reason,
-      reasoning:   nextStep.reasoning,
-      approver:    nextStep.approver,
+      action:       nextStep.action,
+      label:        nextStep.label,
+      reason:       blockReason,
+      reasoning:    nextStep.reasoning,
+      approver:     nextStep.approver,
       approverRole: nextStep.approverRole,
-      stepIndex:   nextStep.step,
-      urgency:     'HIGH',
-      blockedAt:   new Date().toISOString(),
-      t3nDenied:   !delegResult.authorized
+      stepIndex:    nextStep.step,
+      urgency:      'HIGH',
+      blockedAt:    new Date().toISOString(),
+      t3nDenied:    !delegResult.authorized,
+      credDenied,
+      credential:   credCheck.credential?.credential_id || null
     };
 
     incident.auditTrail.push({
@@ -225,16 +257,26 @@ async function executeNextStep(incidentId) {
       action:      nextStep.action,
       label:       nextStep.label,
       status:      'BLOCKED',
-      reason:      nextStep.reason,
+      reason:      blockReason,
       approver:    nextStep.approver,
       agentDID:    incident.agentIdentity?.did,
       t3nDenied:   !delegResult.authorized,
+      credDenied,
+      credentialId: credCheck.credential?.credential_id || null,
       timestamp:   new Date().toISOString(),
       t3nVerified: true,
       simulation:  delegResult.simulation
     });
 
-    console.log(`🔒 T3N DENIED: ${nextStep.action} — escalating to ${nextStep.approver}`);
+    recordAuditEvent({
+      agent:        incident.agentIdentity?.did,
+      credentialId: credCheck.credential?.credential_id || null,
+      action:       nextStep.action,
+      result:       'BLOCKED',
+      metadata:     { incidentId, credDenied, t3nDenied: !delegResult.authorized }
+    });
+
+    console.log(`🔒 BLOCKED: ${nextStep.action} — credDenied=${credDenied} t3nDenied=${!delegResult.authorized}`);
     return;
   }
 
@@ -362,6 +404,9 @@ function sanitizeIncident(inc) {
     recoveryProgress:  inc.recoveryProgress,
     plan:              inc.plan,
     agentIdentity:     inc.agentIdentity,
+    agentId:           inc.agentId || null,
+    activeCredential:  inc.activeCredential || null,
+    activeCredPerms:   inc.activeCredPerms || [],
     startTime:         inc.startTime,
     completeTime:      inc.completeTime,
     recovery:          inc.recovery || null,
